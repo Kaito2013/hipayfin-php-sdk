@@ -78,9 +78,11 @@ try {
     echo json_encode(array('status' => 'success'));
 
 } catch (HiPayFinSignatureException $e) {
+    @file_put_contents(__DIR__ . '/webhook.log', "[ERROR] " . $e->getMessage() . " | Sig: {$signature} | Ts: {$timestamp}\n---\n", FILE_APPEND);
     http_response_code(401);
     echo json_encode(array('error' => 'Invalid signature or timestamp expired'));
 } catch (\Exception $e) {
+    @file_put_contents(__DIR__ . '/webhook.log', "[ERROR] " . $e->getMessage() . "\n---\n", FILE_APPEND);
     http_response_code(400);
     echo json_encode(array('error' => $e->getMessage()));
 }

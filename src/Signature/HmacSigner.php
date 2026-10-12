@@ -74,17 +74,22 @@ class HmacSigner
         $expectedHex = hash_hmac('sha256', $payloadToSign, (string)$webhookSecret);
         $expectedSignature = 'sha256=' . strtolower($expectedHex);
 
-        if (function_exists('hash_equals')) {
-            return hash_equals($expectedSignature, $receivedSignature);
+        $cleanReceived = strtolower(trim((string)$receivedSignature));
+        if (strpos($cleanReceived, 'sha256=') !== 0) {
+            $cleanReceived = 'sha256=' . $cleanReceived;
         }
 
-        if (strlen($expectedSignature) !== strlen($receivedSignature)) {
+        if (function_exists('hash_equals')) {
+            return hash_equals($expectedSignature, $cleanReceived);
+        }
+
+        if (strlen($expectedSignature) !== strlen($cleanReceived)) {
             return false;
         }
         $res = 0;
         $len = strlen($expectedSignature);
         for ($i = 0; $i < $len; $i++) {
-            $res |= ord($expectedSignature[$i]) ^ ord($receivedSignature[$i]);
+            $res |= ord($expectedSignature[$i]) ^ ord($cleanReceived[$i]);
         }
         return $res === 0;
     }

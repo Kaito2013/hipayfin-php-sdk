@@ -27,12 +27,24 @@ class WebhookService
      */
     public function verify($rawBody, $signature, $timestamp, $secret = null, $tolerance = 300)
     {
-        $sec = ($secret !== null) ? (string)$secret : $this->config->getWebhookSecret();
-        if (empty($sec)) {
+        $primarySecret = ($secret !== null) ? (string)$secret : $this->config->getWebhookSecret();
+        if (empty($primarySecret)) {
             throw new HiPayFinValidationException('Webhook signing secret is not configured', 'webhook_secret');
         }
 
-        return HmacSigner::verifyWebhook($rawBody, $signature, $timestamp, $sec, $tolerance);
+        if (HmacSigner::verifyWebhook($rawBody, $signature, $timestamp, $primarySecret, $tolerance)) {
+            return true;
+        }
+
+        // Fallback: If primary secret failed and hmac_secret is different, test hmac_secret
+        $hmacSecret = $this->config->getHmacSecret();
+        if (!empty($hmacSecret) && $hmacSecret !== $primarySecret) {
+            if (HmacSigner::verifyWebhook($rawBody, $signature, $timestamp, $hmacSecret, $tolerance)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
