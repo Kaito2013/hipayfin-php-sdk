@@ -1,3 +1,5 @@
 .supercoders/
 vendor/
 .DS_Store
+.history/
+*.log

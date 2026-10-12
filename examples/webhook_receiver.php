@@ -11,6 +11,18 @@ $signature = isset($_SERVER['HTTP_X_WEBHOOK_SIGNATURE']) ? $_SERVER['HTTP_X_WEBH
 $timestamp = isset($_SERVER['HTTP_X_WEBHOOK_TIMESTAMP']) ? $_SERVER['HTTP_X_WEBHOOK_TIMESTAMP'] : '';
 $eventId = isset($_SERVER['HTTP_X_WEBHOOK_ID']) ? $_SERVER['HTTP_X_WEBHOOK_ID'] : '';
 
+// Ghi log để tiện theo dõi và kiểm tra webhook
+$logEntry = sprintf(
+    "[%s] IP: %s | Event-ID: %s | Timestamp: %s | Signature: %s\nBody: %s\n---\n",
+    date('Y-m-d H:i:s'),
+    isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'CLI',
+    $eventId,
+    $timestamp,
+    $signature,
+    $rawBody
+);
+@file_put_contents(__DIR__ . '/webhook.log', $logEntry, FILE_APPEND);
+
 try {
     // 1. Verify signature & check timestamp drift (anti-replay <= 300s)
     $event = $client->webhook->verifyAndParse($rawBody, $signature, $timestamp);

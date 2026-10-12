@@ -59,7 +59,7 @@ class Config
 
     public function getWebhookSecret()
     {
-        return $this->webhookSecret;
+        return !empty($this->webhookSecret) ? $this->webhookSecret : $this->hmacSecret;
     }
 
     public function getEnvironment()

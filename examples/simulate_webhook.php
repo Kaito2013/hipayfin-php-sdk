@@ -5,7 +5,7 @@
  * Simulates HiPayFin server sending a signed webhook event
  * to a target URL (e.g. webhook.site or your local handler).
  */
-require_once __DIR__ . '/../autoload.php';
+require_once __DIR__ . '/config.php';
 
 use Lucas\HiPayFin\Support\Currency;
 use Lucas\HiPayFin\Support\Uuid;
@@ -16,7 +16,9 @@ $targetWebhookUrl = isset($argv[1])
     : 'https://webhook.site/f34fdcdb-bce4-428b-919e-676134dcbad0';
 
 // Secret used to sign the webhook
-$webhookSecret = '35b0091558ae05393e31643b7da158fefbc5397a6eaa037054bcd0b5aff045de';
+$webhookSecret = isset($config['hmac_secret']) 
+    ? $config['hmac_secret'] 
+    : '1ba1a939f2f08daf0e4ad683e3560eb5984609f92fca17d2fa07f28fb8ae9338';
 
 // 1. Prepare Webhook Event Payload (payment.confirmed)
 $timestamp = (string)time();

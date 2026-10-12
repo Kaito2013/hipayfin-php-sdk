@@ -49,7 +49,7 @@ try {
     echo "  ✓ Khởi tạo xác thực thành công!\n";
     echo "  - Verification ID: {$verificationId}\n";
     echo "  - Next Action:     {$nextAction}\n";
-    echo "  - Expires At:      " . $previewRes['expires_at'] . "\n\n";
+    echo "  - Expires At:      " . (isset($previewRes['expires_at']) ? $previewRes['expires_at'] : 'N/A') . "\n\n";
 
     // -------------------------------------------------------------
     // BƯỚC 2: Xác nhận mã verify code (POST /payin/krw/verify/confirm)
