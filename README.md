@@ -107,6 +107,42 @@ header('Location: ' . $link['hosted_page_url']);
 exit;
 ```
 
+### D. Tạo đơn nạp KRW trực tiếp (Direct Payin KRW — Không dùng Hosted Link)
+Quy trình nạp KRW gồm 3 bước xác thực danh tính chủ tài khoản và cấp số Virtual Account (VA) ngân hàng Hàn Quốc:
+
+```php
+// Bước 1: Khởi tạo xác thực chủ tài khoản (POST /payin/krw/preview)
+$preview = $client->payin->previewKrw([
+    'merchant_customer_id'  => 'CUST-KRW-001',
+    'amount'                => '150000', // Tối thiểu 100,001 KRW
+    'sender_account_name'   => 'Hong Gildong',
+    'sender_name_kr'        => '홍길동',
+    'sender_bank_code'      => 'KOOKMIN',
+    'sender_account_number' => '11012345678',
+    'sender_dob'            => '970101',
+]);
+$verificationId = $preview['verification_id'];
+
+// Bước 2: Xác nhận mã verify code (Sandbox test: 6666) (POST /payin/krw/verify/confirm)
+$confirm = $client->payin->confirmKrwVerification($verificationId, '6666');
+
+// Bước 3: Tạo đơn nạp tiền trực tiếp (POST /payin/krw/create)
+$order = $client->payin->createKrw([
+    'merchant_order_id'     => 'ORD-KRW-DIR-1001',
+    'merchant_customer_id'  => 'CUST-KRW-001',
+    'amount'                => '150000',
+    'sender_account_name'   => 'Hong Gildong',
+    'sender_name_kr'        => '홍길동',
+    'sender_bank_code'      => 'KOOKMIN',
+    'sender_account_number' => '11012345678',
+    'sender_dob'            => '970101',
+    'verification_id'       => $verificationId,
+]);
+
+echo "Order Ref: " . $order['order_ref'];
+print_r($order['instruction']); // Bank, VA Account Number, Account Holder
+```
+
 ---
 
 ## 💸 2. Quy Trình Chi Tiền / Rút Tiền (Payout)
@@ -139,11 +175,33 @@ $payout = $client->payout->createUsdt([
 ]);
 ```
 
-### C. Lấy danh sách ngân hàng Việt Nam hỗ trợ Payout
+### C. Chi tiền trực tiếp KRW về ngân hàng Hàn Quốc (Direct Payout KRW)
+
+Thị trường Hàn Quốc yêu cầu bắt buộc tên tiếng Hàn (`customer_name_kr`) và tên ngân hàng (`bank_name`):
 
 ```php
-$banks = $client->payout->getBanks('vnd');
-print_r($banks['banks']); // Mã code, tên ngân hàng
+// Xem trước số tiền nhận được (Preview - tuỳ chọn)
+$preview = $client->payout->preview('krw', '100001');
+
+// Tạo lệnh chi tiền trực tiếp:
+$payout = $client->payout->createKrw([
+    'merchant_order_id'    => 'PO-KRW-5001',
+    'merchant_customer_id' => 'CUST-KRW-001',
+    'amount'               => '100001',          // Chuỗi số nguyên, tối thiểu 100,001 KRW trên Sandbox
+    'bank_name'            => 'Kookmin Bank',    // Tên ngân hàng
+    'account_number'       => '11012345678',    // Số tài khoản người nhận
+    'account_holder'       => 'Hong Gildong',    // Tên chủ tài khoản
+    'customer_name_kr'     => '홍길동',          // Tên tiếng Hàn bắt buộc
+]);
+
+echo "Payout Order Ref: " . $payout['order_ref'];
+echo "Trạng thái: " . $payout['status']; // PROVIDER_PENDING
+```
+
+### D. Lấy danh sách ngân hàng hỗ trợ Payout
+```php
+$vndBanks = $client->payout->getBanks('vnd');
+$krwBanks = $client->payout->getBanks('krw');
 ```
 
 ---
@@ -326,6 +384,40 @@ php examples/simulate_webhook.php https://yourdomain.com/webhook.php
 
 ---
 
+### 4.5. Cơ Chế Xác Thực Chữ Ký 2 Lớp (Auto-fallback Secret)
+
+Trong hệ thống bảo mật của HiPayFin:
+- **`hmac_secret`**: Dùng để ký các request API từ Merchant gửi lên server HiPayFin.
+- **`webhook_secret`**: Khóa bí mật riêng do HiPayFin cấp để ký các Webhook gửi về cho Merchant.
+
+SDK đã tích hợp sẵn cơ chế **Auto-fallback 2 lớp**:
+1. Ưu tiên xác thực chữ ký bằng `webhook_secret` được cấu hình.
+2. Nếu không khớp (ví dụ Merchant dùng chung key hoặc Operator cấu hình key riêng), SDK sẽ **tự động xác thực dự phòng bằng `hmac_secret`**.
+3. **Chuẩn hóa chữ ký tự động**: Tự động loại bỏ khoảng trắng thừa (`trim`), hỗ trợ so sánh không phân biệt hoa thường và tự động xử lý tiền tố `sha256=`.
+
+---
+
+### 4.6. Hướng Dẫn Test Webhook Local Với Ngrok Domain Cố Định (`*.ngrok-free.dev`)
+
+Để nhận Webhook từ HiPayFin trên môi trường Localhost mà **không bị đổi URL liên tục khi khởi động lại**:
+
+1. **Khởi chạy Ngrok với Static Dev Domain**:
+   ```bash
+   ngrok http 80 --url=your-domain.ngrok-free.dev --host-header=localhost
+   ```
+   > [!IMPORTANT]
+   > **Bắt buộc phải có cờ `--host-header=localhost`**: Giúp Apache/Nginx local nhận diện đúng Virtual Host của máy bạn, tránh bị trả về lỗi `HTTP 404 Not Found`.
+
+2. **Gửi URL cố định một lần duy nhất cho Operator HiPayFin**:
+   ```
+   https://your-domain.ngrok-free.dev/hipayfin/examples/webhook_receiver.php
+   ```
+
+3. **Theo dõi và Replay Webhook trực tiếp qua Web UI**:
+   Mở trình duyệt truy cập: [http://127.0.0.1:4040](http://127.0.0.1:4040) để xem chi tiết từng request, headers, body và bấm Replay kiểm thử lại bất kỳ lúc nào mà không cần tạo đơn mới.
+
+---
+
 ## 🛡️ 5. Xử Lý Lỗi & Khắc Phục Đơn Trùng (`409 DUPLICATE_REQUEST`)
 
 Khi gọi API bị lỗi, SDK sẽ ném ngoại lệ cấu trúc `HiPayFinApiException`:
@@ -372,12 +464,16 @@ phpunit
 
 ## 📂 Các File Mẫu Chạy Thực Tế (Examples)
 
-Xem thư mục `examples/`:
-- `examples/payin_create_vnd.php`: Tạo đơn thu tiền VND.
-- `examples/payin_create_usdt.php`: Tạo đơn thu tiền USDT TRC20.
-- `examples/payout_create_vnd.php`: Tạo lệnh chi tiền VND.
-- `examples/orders_query.php`: Tra cứu ví và đơn hàng.
-- `examples/webhook_receiver.php`: Endpoint mẫu nhận Webhook.
+Xem chi tiết trong thư mục `examples/`:
+- `examples/payin_create_vnd.php`: Tạo đơn thu tiền VND trực tiếp (VietQR, VA).
+- `examples/payin_create_usdt.php`: Tạo đơn thu tiền USDT TRC20 on-chain.
+- `examples/payin_create_hosted_link.php`: Sinh Hosted Payin checkout link.
+- `examples/payin_direct_krw.php`: Nạp tiền KRW trực tiếp (xác thực 3 bước, cấp VA ngân hàng).
+- `examples/payout_create_vnd.php`: Tạo lệnh chi tiền VND về ngân hàng nội địa.
+- `examples/payout_direct_krw.php`: Tạo lệnh chi tiền KRW trực tiếp về ngân hàng Hàn Quốc.
+- `examples/orders_query.php`: Tra cứu số dư ví và chi tiết đơn hàng.
+- `examples/webhook_receiver.php`: Endpoint mẫu nhận và xác thực Webhook chuẩn Production.
+- `examples/simulate_webhook.php`: Tool giả lập tự bắn Webhook kiểm thử nội bộ.
 
 ---
 
