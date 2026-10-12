@@ -34,14 +34,24 @@ abstract class AbstractService
         return $sanitized;
     }
 
-    protected function get($path)
+    protected function httpGet($path)
     {
         return $this->httpClient->request('GET', $path);
     }
 
-    protected function post($path, array $data = null, $idempotencyKey = null)
+    protected function httpPost($path, array $data = null, $idempotencyKey = null)
     {
         $cleanData = ($data !== null) ? $this->sanitizePayload($data) : null;
         return $this->httpClient->request('POST', $path, $cleanData, $idempotencyKey);
+    }
+
+    protected function get($path)
+    {
+        return $this->httpGet($path);
+    }
+
+    protected function post($path, array $data = null, $idempotencyKey = null)
+    {
+        return $this->httpPost($path, $data, $idempotencyKey);
     }
 }
