@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/config.php';
 
+use Lucas\HiPayFin\Support\OrderStatus;
+use Lucas\HiPayFin\Support\WebhookEvent;
 use Lucas\HiPayFin\Exceptions\HiPayFinSignatureException;
 
 // Read raw request headers and body
@@ -10,44 +12,59 @@ $timestamp = isset($_SERVER['HTTP_X_WEBHOOK_TIMESTAMP']) ? $_SERVER['HTTP_X_WEBH
 $eventId = isset($_SERVER['HTTP_X_WEBHOOK_ID']) ? $_SERVER['HTTP_X_WEBHOOK_ID'] : '';
 
 try {
-    // 1. Verify and parse incoming webhook
+    // 1. Verify signature & check timestamp drift (anti-replay <= 300s)
     $event = $client->webhook->verifyAndParse($rawBody, $signature, $timestamp);
 
-    // 2. Anti-duplicate processing check (idempotent consumer)
-    // Example:
-    // if (isEventProcessed($event['event_id'])) {
+    // 2. Anti-duplicate processing check (Idempotent Consumer based on event_id)
+    // if (isEventProcessedInDatabase($event['event_id'])) {
     //     http_response_code(200);
     //     echo json_encode(['status' => 'ignored_duplicate']);
     //     exit;
     // }
 
-    // 3. Handle event types
+    // 3. Tra cứu trạng thái hiện tại của đơn hàng trong Database
+    // $currentLocalOrderStatus = getOrderStatusFromDatabase($event['merchant_order_id']);
+
+    // 4. Handle event types with OrderStatus Lifecycle Rules
     switch ($event['event']) {
-        case 'payment.confirmed':
-            // CRITICAL: Always use actual received amount from webhook
+        case WebhookEvent::PAYMENT_CONFIRMED:
+            // QUY TẮC SỐNG CÒN 1: Nếu đơn đang là EXPIRED nhưng tiền vào muộn, HiPayFin vẫn bắn
+            // payment.confirmed. OrderStatus::canTransition('EXPIRED', 'CONFIRMED') === true!
+            // QUY TẮC SỐNG CÒN 2: Luôn dùng số tiền THỰC TẾ nhận được ($event['amount'])
             $actualAmount = $event['amount'];
             $orderRef = $event['order_ref'];
             $merchantOrderId = $event['merchant_order_id'];
-            // creditUserBalance($merchantOrderId, $actualAmount);
+
+            // if (OrderStatus::canTransition($currentLocalOrderStatus, OrderStatus::CONFIRMED)) {
+            //     updateOrderStatusInDb($merchantOrderId, OrderStatus::CONFIRMED, $orderRef);
+            //     creditUserBalance($merchantOrderId, $actualAmount);
+            // }
             break;
 
-        case 'payment.rejected':
-            // markOrderFailed($event['merchant_order_id'], $event['reason']);
+        case WebhookEvent::PAYMENT_REJECTED:
+            $reason = isset($event['reason']) ? $event['reason'] : OrderStatus::FAILED;
+            $newStatus = ($reason === 'EXPIRED') ? OrderStatus::EXPIRED : OrderStatus::FAILED;
+
+            // QUY TẮC SỐNG CÒN 3: Không bao giờ hạ cấp đơn đã CONFIRMED về EXPIRED/FAILED
+            // if (OrderStatus::canTransition($currentLocalOrderStatus, $newStatus)) {
+            //     updateOrderStatusInDb($event['merchant_order_id'], $newStatus, null, $reason);
+            // }
             break;
 
-        case 'payout.processed':
+        case WebhookEvent::PAYOUT_PROCESSED:
             // markPayoutCompleted($event['order_ref']);
             break;
 
-        case 'payout.blocked':
+        case WebhookEvent::PAYOUT_BLOCKED:
             // markPayoutFailedAndRefundBalance($event['order_ref'], $event['reason']);
             break;
     }
 
-    // 4. Return fast HTTP 200 OK (< 2 seconds)
+    // 5. Luôn phản hồi HTTP 200 OK nhanh chóng (< 2 giây) để tránh HiPayFin retry
     http_response_code(200);
     header('Content-Type: application/json');
     echo json_encode(array('status' => 'success'));
+
 } catch (HiPayFinSignatureException $e) {
     http_response_code(401);
     echo json_encode(array('error' => 'Invalid signature or timestamp expired'));
