@@ -166,51 +166,162 @@ $client->orders->reportEvidence('PI-2026101200088', '5e1c0d892f3a4b5c6d7e8f90123
 
 ---
 
-## 🔔 4. Xử Lý Webhook An Toàn (Server-to-Server)
+## 🔔 4. Xử Lý Webhook An Toàn & Vòng Đời Đơn Hàng (Order Lifecycle) — ⚠️ CỰC KỲ QUAN TRỌNG
 
-HiPayFin sẽ gửi thông báo bất đồng bộ về URL Webhook của bạn. Sử dụng `WebhookService` để xác thực:
+Webhook là cơ chế quan trọng nhất để hệ thống của bạn nhận thông báo trạng thái giao dịch một cách tức thì và tự động từ HiPayFin. Việc triển khai đúng quy chuẩn Webhook là điều kiện tiên quyết để không làm mất tiền của khách hàng và không làm sai lệch số dư.
+
+### 4.1. Bảng 4 Sự Kiện Webhook Chuẩn (`WebhookEvent`)
+
+HiPayFin **chỉ gửi Webhook khi đơn hàng chuyển sang các trạng thái kết thúc (Terminal Statuses)**:
+
+| Sự Kiện (`WebhookEvent`) | Chiều Giao Dịch | Trạng Thái Đích (`OrderStatus`) | Ý Nghĩa Kỹ Thuật |
+| :--- | :---: | :---: | :--- |
+| **`payment.confirmed`** | **Payin** | `CONFIRMED` | Khách đã chuyển tiền thành công, tiền đã cộng vào ví Merchant. |
+| **`payment.rejected`** | **Payin** | `EXPIRED` / `FAILED` | Khách không nạp tiền, hết thời gian chờ thanh toán (`reason: EXPIRED`), hoặc bị cổng từ chối. |
+| **`payout.processed`** | **Payout** | `CONFIRMED` | Tiền chi/rút đã chuyển thành công vào tài khoản ngân hàng / ví crypto của khách. |
+| **`payout.blocked`** | **Payout** | `REJECTED` / `FAILED` | Lệnh rút bị chặn (bị Operator từ chối ở bước `PENDING_APPROVAL`, sai STK, không đủ số dư, v.v.). |
+
+---
+
+### 4.2. 6 Quy Tắc Sống Còn Khi Xử Lý Webhook
+
+#### 1. 🚨 Ngoại lệ Thanh Toán Muộn (`EXPIRED` ➔ `CONFIRMED` — Late Payment)
+- **Tình huống thực tế:** Khi hết hạn thanh toán (ví dụ sau 15–30 phút khách chưa chuyển), HiPayFin chuyển trạng thái đơn sang `EXPIRED` và gửi webhook `payment.rejected` kèm `reason: "EXPIRED"`.
+- **Tuy nhiên:** Nếu sau đó vài tiếng khách mới quét mã QR chuyển tiền vào STK cổng (hoặc ngân hàng bị treo giao dịch đến muộn), **HiPayFin vẫn sẽ ghi có đơn hàng và gửi tiếp webhook `payment.confirmed` về sau!**
+- **Quy tắc thiết kế:** Backend của bạn **BẮT BUỘC PHẢI CHẤP NHẬN** cập nhật đơn hàng thành công (`CONFIRMED`) kể cả khi đơn đó hiện đang ở trạng thái `EXPIRED` trong Database.  
+  👉 SDK đã tích hợp sẵn phương thức thẩm định:
+  ```php
+  OrderStatus::canTransition(OrderStatus::EXPIRED, OrderStatus::CONFIRMED); // true
+  ```
+  *(Nếu bạn khóa cứng đơn khi EXPIRED, khách hàng sẽ bị mất tiền mà không được cộng số dư trên website của bạn).*
+
+#### 2. 🛡️ Quy Tắc Không Bao Giờ Hạ Cấp Trạng Thái (No Status Downgrade)
+- Do cơ chế thử lại (Retry) và độ trễ mạng Internet, một webhook rejected/expired cũ có thể đến sau webhook confirmed.
+- **Quy tắc vàng:** **Tuyệt đối không bao giờ hạ cấp đơn hàng từ `CONFIRMED` về `FAILED` hoặc `EXPIRED`**.
+  ```php
+  OrderStatus::canTransition(OrderStatus::CONFIRMED, OrderStatus::FAILED);  // false
+  OrderStatus::canTransition(OrderStatus::CONFIRMED, OrderStatus::EXPIRED); // false
+  ```
+  *(Một khi đã `CONFIRMED`, trạng thái là tối thượng. Chỉ có can thiệp thủ công `REVERSED` do quản trị viên đối soát mới được phép cập nhật).*
+
+#### 3. 💰 Đối Soát Số Tiền Thực Nhận (`amount` trong `payment.confirmed`)
+- Cổng HiPayFin hỗ trợ cơ chế tự động khớp lệnh khi khách chuyển thiếu hoặc thừa (Auto-credit).
+- **Trường `amount` trong webhook là số tiền THỰC TẾ đã nạp vào ví**, có thể khác với số tiền bạn yêu cầu lúc tạo đơn ban đầu!
+- **Bắt buộc:** Bạn phải cập nhật số dư cho người dùng theo `amount` trong webhook này (`$event['amount']`), không dùng `amount` từ bản ghi tạo đơn ban đầu.
+
+#### 4. 🔁 Chống Trùng Lặp Xử Lý (Idempotent Consumer với `event_id`)
+- Trường `event_id` trong body webhook là duy nhất và giữ nguyên qua tất cả các lần gửi lại.
+- Bạn phải lưu `event_id` vào Database với khóa duy nhất (`UNIQUE`). Nếu nhận lại `event_id` đã xử lý ➔ Trả ngay `HTTP 200 OK` và bỏ qua, không cộng tiền hai lần.
+
+#### 5. ⚡ Phản Hồi HTTP 200 Nhanh Chóng (Dưới 2 Giây)
+- Cổng thanh toán áp dụng timeout **10 giây**. Nếu server của bạn phản hồi chậm hoặc lỗi, HiPayFin sẽ tự động thử lại tối đa **5 lần** theo lịch:  
+  `Lần 1: Ngay lập tức ➔ Lần 2: 1 phút ➔ Lần 3: 5 phút ➔ Lần 4: 30 phút ➔ Lần 5: 2 giờ`.
+- **Khuyến nghị:** Sau khi xác thực chữ ký thành công, hãy lưu event vào hàng đợi (Queue / Database) và phản hồi ngay `HTTP 200 OK`. Các nghiệp vụ nặng (gửi email, gọi API bên thứ ba) hãy chạy nền (Background Job).
+
+#### 6. 🧑‍💼 Xử Lý Đơn Do Operator Tạo Hộ (`op-...`)
+- Quản trị viên HiPayFin có thể tạo link nạp/rút hộ bạn từ Merchant Portal. Các đơn này sẽ bắn webhook với `merchant_order_id` có tiền tố `op-` (ví dụ `op-1758857700000`).
+- Hệ thống của bạn cần lưu vết các đơn này thay vì từ chối lỗi mã đơn hàng lạ.
+
+---
+
+### 4.3. Mã Nguồn Mẫu Triển Khai Webhook Chuẩn Doanh Nghiệp
+
+File mẫu hoàn chỉnh tại [examples/webhook_receiver.php](file:///Users/hoaiminh/Sites/localhost/hipayfin/examples/webhook_receiver.php):
 
 ```php
-// File: webhook.php
+<?php
 require_once __DIR__ . '/autoload.php';
 
 use Lucas\HiPayFin\Client;
+use Lucas\HiPayFin\Support\OrderStatus;
+use Lucas\HiPayFin\Support\WebhookEvent;
 use Lucas\HiPayFin\Exceptions\HiPayFinSignatureException;
 
 $client = new Client([
-    'api_key'        => 'hk_live_VbdBEm3for1GBYzuke6kYl0BHpx9R3afH_yK',
+    'api_key'        => 'hk_live_...',
     'hmac_secret'    => '...',
     'webhook_secret' => 'your_webhook_signing_secret',
 ]);
 
+// 1. Đọc dữ liệu thô và các headers xác thực
 $rawBody   = file_get_contents('php://input');
 $signature = isset($_SERVER['HTTP_X_WEBHOOK_SIGNATURE']) ? $_SERVER['HTTP_X_WEBHOOK_SIGNATURE'] : '';
 $timestamp = isset($_SERVER['HTTP_X_WEBHOOK_TIMESTAMP']) ? $_SERVER['HTTP_X_WEBHOOK_TIMESTAMP'] : '';
+$eventId   = isset($_SERVER['HTTP_X_WEBHOOK_ID'])        ? $_SERVER['HTTP_X_WEBHOOK_ID']        : '';
 
 try {
-    // Tự động kiểm tra chữ ký & chống Replay Attack (lệch giờ ±300s)
+    // 2. Xác thực chữ ký HMAC-SHA256 & chống Replay Attack (lệch giờ ±300s)
     $event = $client->webhook->verifyAndParse($rawBody, $signature, $timestamp);
 
-    // Xử lý sự kiện:
-    if ($event['event'] === 'payment.confirmed') {
-        // QUAN TRỌNG: Cập nhật số dư theo số tiền THỰC TẾ nhận được từ webhook
-        $amountReceived  = $event['amount']; 
-        $merchantOrderId = $event['merchant_order_id'];
-        
-        // Cập nhật số dư cho người dùng trong Database...
+    // 3. Kiểm tra chống xử lý trùng lặp (Idempotent Consumer)
+    // if (isEventProcessedInDatabase($event['event_id'])) {
+    //     http_response_code(200);
+    //     echo json_encode(['status' => 'ignored_duplicate']);
+    //     exit;
+    // }
+
+    // 4. Lấy trạng thái hiện tại của đơn hàng từ Database
+    // $currentLocalStatus = getOrderStatusFromDatabase($event['merchant_order_id']);
+
+    // 5. Xử lý sự kiện theo đúng Vòng đời Đơn hàng
+    switch ($event['event']) {
+        case WebhookEvent::PAYMENT_CONFIRMED:
+            // QUY TẮC SỐNG CÒN 1: Nếu đơn đang EXPIRED nhưng tiền vào trễ, vẫn cho phép chuyển sang CONFIRMED!
+            // QUY TẮC SỐNG CÒN 2: Luôn cộng tiền theo số tiền THỰC TẾ nhận được ($event['amount'])
+            if (OrderStatus::canTransition($currentLocalStatus, OrderStatus::CONFIRMED)) {
+                $actualAmount    = $event['amount'];
+                $orderRef        = $event['order_ref'];
+                $merchantOrderId = $event['merchant_order_id'];
+
+                // updateOrderStatusInDb($merchantOrderId, OrderStatus::CONFIRMED, $orderRef);
+                // creditUserBalance($merchantOrderId, $actualAmount);
+            }
+            break;
+
+        case WebhookEvent::PAYMENT_REJECTED:
+            $reason = isset($event['reason']) ? $event['reason'] : OrderStatus::FAILED;
+            $newStatus = ($reason === 'EXPIRED') ? OrderStatus::EXPIRED : OrderStatus::FAILED;
+
+            // QUY TẮC SỐNG CÒN 3: Tuyệt đối không bao giờ hạ cấp đơn đã CONFIRMED
+            if (OrderStatus::canTransition($currentLocalStatus, $newStatus)) {
+                // updateOrderStatusInDb($event['merchant_order_id'], $newStatus, null, $reason);
+            }
+            break;
+
+        case WebhookEvent::PAYOUT_PROCESSED:
+            // Đã chi tiền thành công cho khách
+            // markPayoutCompleted($event['order_ref']);
+            break;
+
+        case WebhookEvent::PAYOUT_BLOCKED:
+            // Chi tiền thất bại -> hoàn lại số dư nội bộ cho khách
+            // markPayoutFailedAndRefundBalance($event['order_ref'], $event['reason']);
+            break;
     }
 
-    // Luôn phản hồi HTTP 200 nhanh chóng (< 2 giây)
+    // 6. Luôn phản hồi HTTP 200 OK nhanh chóng (< 2 giây)
     http_response_code(200);
+    header('Content-Type: application/json');
     echo json_encode(['status' => 'success']);
 
 } catch (HiPayFinSignatureException $e) {
     http_response_code(401);
-    echo json_encode(['error' => 'Chữ ký không hợp lệ hoặc request quá hạn']);
+    echo json_encode(['error' => 'Chữ ký không hợp lệ hoặc request quá hạn (Replay Attack)']);
 } catch (\Exception $e) {
     http_response_code(400);
     echo json_encode(['error' => $e->getMessage()]);
 }
+```
+
+---
+
+### 4.4. Công Cụ Giả Lập Bắn Thử Webhook (`simulate_webhook.php`)
+
+SDK tích hợp sẵn file giả lập [examples/simulate_webhook.php](file:///Users/hoaiminh/Sites/localhost/hipayfin/examples/simulate_webhook.php) giúp bạn tự bắn các request Webhook chuẩn để kiểm thử endpoint của mình (hoặc kiểm tra trên webhook.site):
+
+```bash
+# Bắn webhook thử nghiệm đến URL mong muốn:
+php examples/simulate_webhook.php https://yourdomain.com/webhook.php
 ```
 
 ---
